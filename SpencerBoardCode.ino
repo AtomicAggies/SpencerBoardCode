@@ -99,7 +99,8 @@ void setup() {
 
   memcpy(telemetry.callsign, "KJ5NPP", sizeof(telemetry.callsign));
 
-  Wire.begin((int)400000);
+  Wire.begin();
+  Wire.setClock(400000);
 
   while (!bmp.begin(BMP5XX_ALTERNATIVE_ADDRESS, &Wire)) {
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
