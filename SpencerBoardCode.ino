@@ -67,7 +67,7 @@ volatile bool can_blink = false;
 
 volatile unsigned long time_of_last_pps = 0;
 const int pps_delay =
-    0; // Only ever change this variable. Everything else should be set.666
+    0; // Only ever change this variable. Everything else should already be set.
 // It is the time (milliseconds) that Jacob's board waits from the last PPS
 
 uint8_t *telemetryBytes() { return reinterpret_cast<uint8_t *>(&telemetry); }
