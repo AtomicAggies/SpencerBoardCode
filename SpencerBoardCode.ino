@@ -65,7 +65,7 @@ SFE_UBLOX_GNSS myGNSS;
 TelemetryData telemetry;
 volatile short can_blink = 0;
 
-volatile int time_of_last_pps = 0;
+volatile unsigned long time_of_last_pps = 0;
 const int pps_delay =
     0; // Only ever change this variable. Everything else should be set.666
 // It is the time (milliseconds) that Jacob's board waits from the last PPS
