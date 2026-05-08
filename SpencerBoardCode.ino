@@ -63,7 +63,7 @@ Adafruit_ISM330DHCX ism330dhcx;
 SFE_UBLOX_GNSS myGNSS;
 
 TelemetryData telemetry;
-volatile short can_blink = 0;
+volatile bool can_blink = false;
 
 volatile unsigned long time_of_last_pps = 0;
 const int pps_delay =
