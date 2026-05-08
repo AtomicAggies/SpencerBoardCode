@@ -1,80 +1,123 @@
-#include <Wire.h>
-#include <SPI.h>
-#include <Adafruit_Sensor.h>
 #include <Adafruit_BMP5xx.h>
-#include <Adafruit_LIS3MDL.h>
 #include <Adafruit_ISM330DHCX.h>
+#include <Adafruit_LIS3MDL.h>
+#include <Adafruit_Sensor.h>
+#include <SPI.h>
+#include <SparkFun_u-blox_GNSS_v3.h>
+#include <Wire.h>
 
 #define LED_PIN 3
+#define PPS_PIN 15
+#define BUZZER_PIN 14
 
-#define ALTITUDE_SIZE 24
-#define MAG_SIZE 16
-#define ACCEL_SIZE 96
-#define GPS_SIZE 92
-#define TEMP_SIZE 16
-const uint8_t PACKET_SIZE = ALTITUDE_SIZE + MAG_SIZE + ACCEL_SIZE + GPS_SIZE + TEMP_SIZE;
+const uint8_t TELEMETRY_PACKET_SIZE = 98;
 
-struct TelemetryData {
-  uint8_t altitude[ALTITUDE_SIZE];
-  uint8_t magnetometer[MAG_SIZE];
-  uint8_t accelerometer[ACCEL_SIZE];
-  uint8_t gps[GPS_SIZE];
-  uint8_t temperature[TEMP_SIZE];
+struct __attribute__((packed)) GPSData {
+  int32_t latitude;
+  int32_t longitude;
+  int32_t altitude;
+  int32_t nedNorthVel;
+  int32_t nedDownVel;
+  int32_t nedEastVel;
+  uint32_t unixEpoch;
 };
 
-struct SDData {
-  uint8_t altitude[ALTITUDE_SIZE];
-  uint8_t magnetometer[MAG_SIZE];
-  uint8_t accelerometer[ACCEL_SIZE];
-  uint8_t gps[GPS_SIZE];
-  uint8_t temperature[TEMP_SIZE];
+struct __attribute__((packed)) BMPData {
+  float temperature;
+  float pressure;
 };
+
+struct __attribute__((packed)) MagnetometerData {
+  int16_t x;
+  int16_t y;
+  int16_t z;
+};
+
+struct __attribute__((packed)) InertialData {
+  float accelX;
+  float accelY;
+  float accelZ;
+  float gyroZ;
+  float gyroY;
+  float gyroX;
+  float temperature;
+};
+
+struct __attribute__((packed)) TelemetryData {
+  char callsign[6];
+  GPSData gps;
+  BMPData bmp;
+  MagnetometerData magnetometer;
+  InertialData inertial;
+  uint8_t reserved[TELEMETRY_PACKET_SIZE - 6 - sizeof(GPSData) -
+                   sizeof(BMPData) - sizeof(MagnetometerData) -
+                   sizeof(InertialData)];
+};
+
+static_assert(sizeof(TelemetryData) == TELEMETRY_PACKET_SIZE,
+              "TelemetryData must remain 98 bytes");
 
 Adafruit_BMP5xx bmp;
 Adafruit_LIS3MDL lis3mdl = Adafruit_LIS3MDL();
 Adafruit_ISM330DHCX ism330dhcx;
+SFE_UBLOX_GNSS myGNSS;
 
-sensors_event_t accel;
-sensors_event_t gyro;
-sensors_event_t temp;
+TelemetryData telemetry;
+volatile bool can_blink = false;
 
-volatile TelemetryData tx_packet;
-volatile SDData sd_packet;
+volatile unsigned long time_of_last_pps = 0;
+const int pps_delay =
+    0; // Only ever change this variable. Everything else should already be set.
+// It is the time (milliseconds) that Jacob's board waits from the last PPS
+
+uint8_t *telemetryBytes() { return reinterpret_cast<uint8_t *>(&telemetry); }
+
+void sendTelemetryPacket(uint8_t address) {
+  Wire.beginTransmission(address);
+  Wire.write(telemetryBytes(), sizeof(telemetry));
+  Wire.endTransmission();
+}
+
+void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct) {
+  (void)ubxDataStruct;
+
+  telemetry.gps.latitude = myGNSS.getLatitude();
+  telemetry.gps.longitude = myGNSS.getLongitude();
+  telemetry.gps.altitude = myGNSS.getAltitude();
+  telemetry.gps.nedNorthVel = myGNSS.getNedNorthVel();
+  telemetry.gps.nedDownVel = myGNSS.getNedDownVel();
+  telemetry.gps.nedEastVel = myGNSS.getNedEastVel();
+  telemetry.gps.unixEpoch = myGNSS.getUnixEpoch();
+}
 
 void setup() {
-  Serial.begin(9600);
-  delay(1000);
-
-  setupBuzzer();
-
-  while (1) {
-    buzzAltitude(31672);
-  }
-
   pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(PPS_PIN, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(PPS_PIN), handleInterrupt, RISING);
+
+  memcpy(telemetry.callsign, "KJ5NPP", sizeof(telemetry.callsign));
 
   Wire.begin();
+  Wire.setClock(400000);
 
-  Serial.println("Start BMP setup");
-  //BMP SETUP (Pressure+temp)
   while (!bmp.begin(BMP5XX_ALTERNATIVE_ADDRESS, &Wire)) {
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-    delay(10);
+    delay(30);
   }
 
   bmp.setTemperatureOversampling(BMP5XX_OVERSAMPLING_16X);
   bmp.setPressureOversampling(BMP5XX_OVERSAMPLING_16X);
   bmp.setIIRFilterCoeff(BMP5XX_IIR_FILTER_COEFF_3);
-  bmp.setOutputDataRate(BMP5XX_ODR_50_HZ);  //Set this lower for slower speeds
+  bmp.setOutputDataRate(BMP5XX_ODR_50_HZ);
   bmp.setPowerMode(BMP5XX_POWERMODE_NORMAL);
   bmp.enablePressure(true);
-  bmp.configureInterrupt(BMP5XX_INTERRUPT_LATCHED, BMP5XX_INTERRUPT_ACTIVE_HIGH, BMP5XX_INTERRUPT_PUSH_PULL, BMP5XX_INTERRUPT_DATA_READY, true);
+  bmp.configureInterrupt(BMP5XX_INTERRUPT_LATCHED, BMP5XX_INTERRUPT_ACTIVE_HIGH,
+                         BMP5XX_INTERRUPT_PUSH_PULL,
+                         BMP5XX_INTERRUPT_DATA_READY, true);
 
-  Serial.println("End BMP setup");
-
-  //LIS Setup (Magnetometer)
-  Serial.println("Start LIS setup");
-  while (!lis3mdl.begin_I2C()) {  // Initializes using default 0x1C
+  while (!lis3mdl.begin_I2C()) {
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     delay(100);
   }
@@ -85,10 +128,6 @@ void setup() {
   lis3mdl.setRange(LIS3MDL_RANGE_4_GAUSS);
   lis3mdl.setIntThreshold(500);
 
-  Serial.println("End LIS setup");
-
-  //ISM Setup (Accel + gyro)
-  Serial.println("Start accel setup");
   while (!ism330dhcx.begin_I2C()) {
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     delay(1000);
@@ -98,46 +137,55 @@ void setup() {
   ism330dhcx.setAccelDataRate(LSM6DS_RATE_6_66K_HZ);
   ism330dhcx.setGyroDataRate(LSM6DS_RATE_6_66K_HZ);
 
-  Serial.println("End accel setup");
+  while (myGNSS.begin() == false) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(1000);
+    digitalWrite(LED_PIN, LOW);
+    delay(500);
+  }
+
+  myGNSS.setAutoPVT(true);
+  myGNSS.setAutoPVTcallbackPtr(saveGPSData);
+
+  digitalWrite(LED_PIN, LOW);
 }
 
 void loop() {
-  if (!bmp.dataReady()) { return; }
-
-  if (!bmp.performReading()) { return; }
-
-  Serial.print(bmp.temperature);
-  Serial.print(" ");
-  Serial.print(bmp.pressure);
-  Serial.print(" ");
+  if (bmp.performReading()) {
+    telemetry.bmp.temperature = bmp.temperature;
+    telemetry.bmp.pressure = bmp.pressure;
+  }
 
   lis3mdl.read();
+  telemetry.magnetometer.x = lis3mdl.x;
+  telemetry.magnetometer.y = lis3mdl.y;
+  telemetry.magnetometer.z = lis3mdl.z;
 
-  Serial.print(lis3mdl.x);
-  Serial.print(" ");
-  Serial.print(lis3mdl.y);
-  Serial.print(" ");
-  Serial.print(lis3mdl.z);
-  Serial.print(" ");
+  sensors_event_t accel;
+  sensors_event_t gyro;
+  sensors_event_t temp;
 
-  ism330dhcx.getEvent(&accel, &gyro, &temp);
+  if (ism330dhcx.getEvent(&accel, &gyro, &temp)) {
+    telemetry.inertial.accelX = accel.acceleration.x;
+    telemetry.inertial.accelY = accel.acceleration.y;
+    telemetry.inertial.accelZ = accel.acceleration.z;
+    telemetry.inertial.gyroZ = gyro.gyro.z;
+    telemetry.inertial.gyroY = gyro.gyro.y;
+    telemetry.inertial.gyroX = gyro.gyro.x;
+    telemetry.inertial.temperature = temp.temperature;
+  }
 
-  Serial.print(temp.temperature);
-  Serial.print(" ");
-  Serial.print(gyro.gyro.x);
-  Serial.print(" ");
-  Serial.print(gyro.gyro.y);
-  Serial.print(" ");
-  Serial.print(gyro.gyro.z);
-  Serial.print(" ");
-  Serial.print(accel.acceleration.x);
-  Serial.print(" ");
-  Serial.print(accel.acceleration.y);
-  Serial.print(" ");
-  Serial.print(accel.acceleration.z);
-  Serial.print(" ");
+  sendTelemetryPacket(0xAA);
 
-  Serial.println();
+  if (millis() - time_of_last_pps > 550 + pps_delay && can_blink) {
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    sendTelemetryPacket(0xBB);
+    can_blink = 0;
+  }
+}
 
-  delay(10);  // Short delay since we're checking dataReady()
+void handleInterrupt(void) {
+  time_of_last_pps = millis();
+  can_blink = 1;
+  digitalWrite(LED_PIN, LOW);
 }
