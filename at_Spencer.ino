@@ -11,15 +11,11 @@
 #define BUZZER_PIN 14
 
 Adafruit_BMP5xx bmp; // temp / pres
-Adafruit_LIS3MDL lis3mdl = Adafruit_LIS3MDL(); //
+Adafruit_LIS3MDL lis3mdl = Adafruit_LIS3MDL();
 Adafruit_ISM330DHCX ism330dhcx;
 SFE_UBLOX_GNSS myGNSS;
 
-sensors_event_t accel;
-sensors_event_t gyro;
-sensors_event_t temp;
-
-char I2C_transmit_buffer[98];
+uint8_t I2C_transmit_buffer[98];
 volatile uint8_t I2C_buffer_position = 6;
 volatile short can_blink = 0;
 
@@ -27,7 +23,7 @@ volatile int time_of_last_pps = 0;
 const int pps_delay = 0; //Only ever change this variable. Everything else should be set.
 //It is the time (milliseconds) that Jacob's board waits from the last PPS
 
-void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct){
+/*void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct){
     int32_t *buf32 = (int32_t*)I2C_transmit_buffer;
 
     buf32[6] = ubxDataStruct->lat; //Yeah look this up it's magic
@@ -38,7 +34,7 @@ void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct){
     buf32[11] = ubxDataStruct->velD;
 
     *((int64_t*)(I2C_transmit_buffer + 48)) = ubxDataStruct->iTOW; 
-}
+}*/
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);
@@ -86,7 +82,7 @@ void setup() {
   ism330dhcx.setAccelDataRate(LSM6DS_RATE_6_66K_HZ);
   ism330dhcx.setGyroDataRate(LSM6DS_RATE_6_66K_HZ);
 
-  while (myGNSS.begin() == false) {
+  /*while (myGNSS.begin() == false) {
     digitalWrite(LED_PIN, HIGH);
     delay(1000);
     digitalWrite(LED_PIN, LOW);
@@ -94,13 +90,13 @@ void setup() {
   }
 
   myGNSS.setAutoPVT(true);
-  myGNSS.setAutoPVTcallbackPtr(saveGPSData);
+  myGNSS.setAutoPVTcallbackPtr(saveGPSData);*/
 
   digitalWrite(LED_PIN, LOW);
 }
 
 void loop() {
-  I2C_buffer_position = 6 + 50; //6 For callsign 32 for GPS data 
+  I2C_buffer_position = 6; //6 For callsign 32 for GPS data 
 
   if(bmp.performReading()){
     memcpy(I2C_transmit_buffer + I2C_buffer_position, &bmp.temperature, 4);
@@ -120,22 +116,29 @@ void loop() {
   memcpy(I2C_transmit_buffer + I2C_buffer_position, &lis3mdl.z, 2);
   I2C_buffer_position += 2;
 
-  ism330dhcx.getEvent(&accel, &gyro, &temp);
+  sensors_event_t accel;
+  sensors_event_t gyro;
+  sensors_event_t temp;
 
-  memcpy(I2C_transmit_buffer + I2C_buffer_position, &temp.temperature, 4);
-  I2C_buffer_position += 4;
-  memcpy(I2C_transmit_buffer + I2C_buffer_position, &gyro.gyro.x, 4);
-  I2C_buffer_position += 4;
-  memcpy(I2C_transmit_buffer + I2C_buffer_position, &gyro.gyro.y, 4);
-  I2C_buffer_position += 4;
-  memcpy(I2C_transmit_buffer + I2C_buffer_position, &gyro.gyro.z, 4);
-  I2C_buffer_position += 4;
-  memcpy(I2C_transmit_buffer + I2C_buffer_position, &accel.acceleration.x, 4);
-  I2C_buffer_position += 4;
-  memcpy(I2C_transmit_buffer + I2C_buffer_position, &accel.acceleration.y, 4);
-  I2C_buffer_position += 4;
-  memcpy(I2C_transmit_buffer + I2C_buffer_position, &accel.acceleration.z, 4);
-
+  if(ism330dhcx.getEvent(&accel, &gyro, &temp)){
+    memcpy(I2C_transmit_buffer + I2C_buffer_position, &accel.acceleration.x, 4);
+    I2C_buffer_position += 4;
+    memcpy(I2C_transmit_buffer + I2C_buffer_position, &accel.acceleration.y, 4);
+    I2C_buffer_position += 4;
+    memcpy(I2C_transmit_buffer + I2C_buffer_position, &accel.acceleration.z, 4);
+    I2C_buffer_position += 4;
+    memcpy(I2C_transmit_buffer + I2C_buffer_position, &gyro.gyro.z, 4);
+    I2C_buffer_position += 4;
+    memcpy(I2C_transmit_buffer + I2C_buffer_position, &gyro.gyro.y, 4);
+    I2C_buffer_position += 4;
+    memcpy(I2C_transmit_buffer + I2C_buffer_position, &gyro.gyro.x, 4);
+    I2C_buffer_position += 4;
+    memcpy(I2C_transmit_buffer + I2C_buffer_position, &temp.temperature, 4);
+    I2C_buffer_position += 4;
+  }
+  else{
+    I2C_buffer_position += 24;
+  }
   Wire.beginTransmission(0xAA);
   Wire.write(I2C_transmit_buffer, 98);
   Wire.endTransmission();
