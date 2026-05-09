@@ -9,6 +9,7 @@
 #define LED_PIN 3
 #define PPS_PIN 15
 #define BUZZER_PIN 14
+#define BUILTIN_LED_PIN 13
 
 const uint8_t TELEMETRY_PACKET_SIZE = 98;
 
@@ -66,8 +67,9 @@ TelemetryData telemetry;
 volatile bool can_blink = false;
 
 volatile unsigned long time_of_last_pps = 0;
-const int pps_delay =
-    0; // Only ever change this variable. Everything else should already be set.
+
+ // Only ever change this variable. Everything else should already be set.
+const int pps_delay = 0;
 // It is the time (milliseconds) that Jacob's board waits from the last PPS
 
 uint8_t *telemetryBytes() { return reinterpret_cast<uint8_t *>(&telemetry); }
@@ -81,6 +83,9 @@ void sendTelemetryPacket(uint8_t address) {
 void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct) {
   (void)ubxDataStruct;
 
+  // Pulse the builtin LED if we get a callback from the GPS
+  digitalWrite(BUILTIN_LED_PIN, HIGH);
+
   telemetry.gps.latitude = myGNSS.getLatitude();
   telemetry.gps.longitude = myGNSS.getLongitude();
   telemetry.gps.altitude = myGNSS.getAltitude();
@@ -88,12 +93,17 @@ void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct) {
   telemetry.gps.nedDownVel = myGNSS.getNedDownVel();
   telemetry.gps.nedEastVel = myGNSS.getNedEastVel();
   telemetry.gps.unixEpoch = myGNSS.getUnixEpoch();
+
+  digitalWrite(BUILTIN_LED_PIN, LOW);
 }
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(PPS_PIN, INPUT_PULLUP);
+  pinMode(BUILTIN_LED_PIN, OUTPUT);
+
+  digitalWrite(BUILTIN_LED_PIN, LOW);
 
   attachInterrupt(digitalPinToInterrupt(PPS_PIN), handleInterrupt, RISING);
 
@@ -174,6 +184,8 @@ void loop() {
     telemetry.inertial.gyroX = gyro.gyro.x;
     telemetry.inertial.temperature = temp.temperature;
   }
+
+  myGNSS.checkUblox();
 
   sendTelemetryPacket(0xAA);
 
