@@ -15,7 +15,6 @@
 #define BUZZER_PIN 14
 #define BUILTIN_LED_PIN 13
 
-const uint8_t TELEMETRY_PACKET_SIZE = 98;
 const uint8_t I2C_BROADCAST_ADDRESS = 0x00;
 const uint8_t I2C_FRAME_MAX_SIZE = 32;
 const uint8_t I2C_FRAME_HEADER_SIZE = 2;
@@ -68,13 +67,13 @@ struct __attribute__((packed)) MagnetometerData {
 };
 
 struct __attribute__((packed)) InertialData {
+  float temperature;
+  float gyroX;
+  float gyroY;
+  float gyroZ;
   float accelX;
   float accelY;
   float accelZ;
-  float gyroZ;
-  float gyroY;
-  float gyroX;
-  float temperature;
 };
 
 struct __attribute__((packed)) TelemetryData {
@@ -86,14 +85,11 @@ struct __attribute__((packed)) TelemetryData {
   InertialData inertial;
   uint8_t lastI2CBytesWritten;
   uint8_t lastI2CStatus;
-  uint8_t reserved[TELEMETRY_PACKET_SIZE - sizeof(uint16_t) -
-                   sizeof(uint8_t) - sizeof(GPSData) - sizeof(BMPData) -
-                   sizeof(MagnetometerData) - sizeof(InertialData) -
-                   sizeof(uint8_t) - sizeof(uint8_t)];
 };
 
-static_assert(sizeof(TelemetryData) == TELEMETRY_PACKET_SIZE,
-              "TelemetryData must remain 98 bytes");
+static_assert(sizeof(TelemetryData) == 75,
+              "TelemetryData must be 75 bytes; update I2C/LoRa peers if layout changes");
+const uint8_t TELEMETRY_PACKET_SIZE = sizeof(TelemetryData);
 
 Adafruit_BMP5xx bmp;
 Adafruit_LIS3MDL lis3mdl = Adafruit_LIS3MDL();
