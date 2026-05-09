@@ -15,7 +15,26 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 PACKET_SIZE = 98
-LINE_TERMINATED_RECORD_SIZE = PACKET_SIZE + 2
+RECORD_FORMAT_AUTO = "auto"
+RECORD_FORMAT_RAW = "raw"
+RECORD_FORMAT_LF = "lf"
+RECORD_FORMAT_CR = "cr"
+RECORD_FORMAT_CRLF = "crlf"
+RECORD_FORMAT_LABELS = {
+    "Auto detect": RECORD_FORMAT_AUTO,
+    "Raw 98-byte packets": RECORD_FORMAT_RAW,
+    "LF/newline terminated (98 + 0A)": RECORD_FORMAT_LF,
+    "CR terminated (98 + 0D)": RECORD_FORMAT_CR,
+    "CRLF terminated (98 + 0D0A)": RECORD_FORMAT_CRLF,
+}
+RECORD_FORMAT_DISPLAY = {value: label for label, value in RECORD_FORMAT_LABELS.items()}
+RECORD_TERMINATORS = {
+    RECORD_FORMAT_RAW: b"",
+    RECORD_FORMAT_LF: b"\n",
+    RECORD_FORMAT_CR: b"\r",
+    RECORD_FORMAT_CRLF: b"\r\n",
+}
+
 
 VALIDITY_FLAGS = {
     "gps": (1 << 0, "GPS"),
@@ -152,34 +171,65 @@ def _looks_like_hex_text(data: bytes) -> bool:
     return bool(stripped) and len(stripped) % 2 == 0 and bool(HEX_TEXT_RE.match(data))
 
 
-def _split_records(data: bytes):
+def _split_records_for_format(data: bytes, record_format: str):
+    terminator = RECORD_TERMINATORS[record_format]
+    record_size = PACKET_SIZE + len(terminator)
+    if len(data) % record_size != 0:
+        raise ValueError(
+            f"Input contains {len(data)} bytes after decoding, which is not a "
+            f"multiple of {record_size} for {RECORD_FORMAT_DISPLAY[record_format]}."
+        )
+
+    packets = []
+    for offset in range(0, len(data), record_size):
+        record = data[offset : offset + record_size]
+        packet = record[:PACKET_SIZE]
+        record_terminator = record[PACKET_SIZE:]
+        if record_terminator != terminator:
+            raise ValueError(
+                f"Record at byte offset {offset} does not end with "
+                f"the expected {terminator.hex() or 'no'} terminator."
+            )
+        packets.append(packet)
+    return packets
+
+
+def _split_records(data: bytes, record_format: str = RECORD_FORMAT_AUTO):
     if len(data) == 0:
-        return []
-    if len(data) % PACKET_SIZE == 0:
-        return [data[i : i + PACKET_SIZE] for i in range(0, len(data), PACKET_SIZE)]
-    if len(data) % LINE_TERMINATED_RECORD_SIZE == 0:
-        packets = []
-        for offset in range(0, len(data), LINE_TERMINATED_RECORD_SIZE):
-            record = data[offset : offset + LINE_TERMINATED_RECORD_SIZE]
-            if record[PACKET_SIZE:] != b"\r\n":
-                break
-            packets.append(record[:PACKET_SIZE])
-        if len(packets) * LINE_TERMINATED_RECORD_SIZE == len(data):
-            return packets
+        return [], record_format
+    if record_format != RECORD_FORMAT_AUTO:
+        return _split_records_for_format(data, record_format), record_format
+
+    format_order = (
+        RECORD_FORMAT_CRLF,
+        RECORD_FORMAT_LF,
+        RECORD_FORMAT_CR,
+        RECORD_FORMAT_RAW,
+    )
+    errors = []
+    for candidate_format in format_order:
+        try:
+            packets = _split_records_for_format(data, candidate_format)
+        except ValueError as exc:
+            errors.append(f"{RECORD_FORMAT_DISPLAY[candidate_format]}: {exc}")
+            continue
+        return packets, candidate_format
+
     raise ValueError(
-        f"Input contains {len(data)} bytes after decoding. Expected a multiple of "
-        f"{PACKET_SIZE} bytes, or {LINE_TERMINATED_RECORD_SIZE}-byte records with CRLF."
+        "Could not auto-detect packet record format. Tried raw 98-byte packets, "
+        "LF-terminated 99-byte records, CR-terminated 99-byte records, and "
+        "CRLF-terminated 100-byte records. Details: " + "; ".join(errors)
     )
 
 
-def load_packets(path: pathlib.Path):
+def load_packets(path: pathlib.Path, record_format: str = RECORD_FORMAT_AUTO):
     data = path.read_bytes()
     if _looks_like_hex_text(data):
         data = bytes.fromhex(data.decode("ascii"))
-    packets = _split_records(data)
+    packets, detected_format = _split_records(data, record_format)
     if not packets:
         raise ValueError("No packets found in the selected file")
-    return packets
+    return packets, detected_format
 
 
 class TelemetryPacketViewer(tk.Tk):
@@ -194,6 +244,8 @@ class TelemetryPacketViewer(tk.Tk):
         self.path_var = tk.StringVar(value="No file loaded")
         self.packet_var = tk.StringVar(value="Packet 0 of 0")
         self.goto_var = tk.StringVar(value="1")
+        self.record_format_var = tk.StringVar(value="Auto detect")
+        self.current_record_format = RECORD_FORMAT_AUTO
 
         self._build_ui()
         if initial_path is not None:
@@ -203,6 +255,15 @@ class TelemetryPacketViewer(tk.Tk):
         top = ttk.Frame(self, padding=8)
         top.pack(fill=tk.X)
 
+        ttk.Label(top, text="Record format:").pack(side=tk.LEFT)
+        format_selector = ttk.Combobox(
+            top,
+            textvariable=self.record_format_var,
+            values=tuple(RECORD_FORMAT_LABELS.keys()),
+            state="readonly",
+            width=31,
+        )
+        format_selector.pack(side=tk.LEFT, padx=(4, 8))
         ttk.Button(top, text="Open log…", command=self.open_file).pack(side=tk.LEFT)
         ttk.Label(top, textvariable=self.path_var, padding=(10, 0)).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -278,14 +339,18 @@ class TelemetryPacketViewer(tk.Tk):
             self.open_path(pathlib.Path(filename))
 
     def open_path(self, path: pathlib.Path):
+        selected_format = RECORD_FORMAT_LABELS[self.record_format_var.get()]
         try:
-            packets = load_packets(path)
+            packets, detected_format = load_packets(path, selected_format)
         except Exception as exc:
             messagebox.showerror("Could not load telemetry log", str(exc))
             return
         self.packets = packets
+        self.current_record_format = detected_format
         self.current_index = 0
-        self.path_var.set(f"{path} ({len(packets)} packets)")
+        self.path_var.set(
+            f"{path} ({len(packets)} packets, {RECORD_FORMAT_DISPLAY[detected_format]})"
+        )
         self.show_packet()
 
     def previous_packet(self):
@@ -350,8 +415,18 @@ class TelemetryPacketViewer(tk.Tk):
 def main():
     parser = argparse.ArgumentParser(description="View Spencer Board telemetry packets")
     parser.add_argument("path", nargs="?", help="Optional telemetry log path to open on startup")
+    parser.add_argument(
+        "--record-format",
+        choices=(RECORD_FORMAT_AUTO, *RECORD_TERMINATORS.keys()),
+        default=RECORD_FORMAT_AUTO,
+        help="Packet record format to use when opening the optional startup path.",
+    )
     args = parser.parse_args()
-    app = TelemetryPacketViewer(args.path)
+    app = TelemetryPacketViewer()
+    if args.record_format != RECORD_FORMAT_AUTO:
+        app.record_format_var.set(RECORD_FORMAT_DISPLAY[args.record_format])
+    if args.path is not None:
+        app.open_path(pathlib.Path(args.path))
     app.mainloop()
 
 
