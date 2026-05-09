@@ -12,6 +12,33 @@
 #define BUILTIN_LED_PIN 13
 
 const uint8_t TELEMETRY_PACKET_SIZE = 98;
+const uint8_t I2C_BROADCAST_ADDRESS = 0x00;
+const uint8_t I2C_FRAME_MAX_SIZE = 32;
+const uint8_t I2C_FRAME_HEADER_SIZE = 2;
+const uint8_t I2C_FRAME_PAYLOAD_SIZE =
+    I2C_FRAME_MAX_SIZE - I2C_FRAME_HEADER_SIZE;
+const unsigned long GPS_VALID_TIMEOUT_MS = 2000;
+
+// I2C frame header byte 0:
+//   bit 0: frame is intended for the SD-card receiver
+//   bit 1: frame is intended for the radio/antenna receiver
+//   bit 7: frame starts a new telemetry packet; clear means continuation
+// I2C frame header byte 1 is an 8-bit checksum of the payload bytes that
+// follow the header. Receivers should drop the current packet on checksum
+// failure and wait for the next frame with I2C_FRAME_START set.
+const uint8_t I2C_FRAME_DESTINATION_SD = 1 << 0;
+const uint8_t I2C_FRAME_DESTINATION_RADIO = 1 << 1;
+const uint8_t I2C_FRAME_DESTINATION_BOTH =
+    I2C_FRAME_DESTINATION_SD | I2C_FRAME_DESTINATION_RADIO;
+const uint8_t I2C_FRAME_START = 1 << 7;
+
+const uint8_t VALIDITY_GPS = 1 << 0;
+const uint8_t VALIDITY_BMP = 1 << 1;
+const uint8_t VALIDITY_MAGNETOMETER = 1 << 2;
+const uint8_t VALIDITY_INERTIAL = 1 << 3;
+
+const uint8_t I2C_STATUS_SUCCESS = 0;
+const uint8_t I2C_STATUS_SHORT_WRITE = 0xFE;
 
 struct __attribute__((packed)) GPSData {
   int32_t latitude;
@@ -46,13 +73,18 @@ struct __attribute__((packed)) InertialData {
 
 struct __attribute__((packed)) TelemetryData {
   char callsign[6];
+  uint16_t packetCounter;
+  uint8_t validity;
   GPSData gps;
   BMPData bmp;
   MagnetometerData magnetometer;
   InertialData inertial;
-  uint8_t reserved[TELEMETRY_PACKET_SIZE - 6 - sizeof(GPSData) -
-                   sizeof(BMPData) - sizeof(MagnetometerData) -
-                   sizeof(InertialData)];
+  uint8_t lastI2CBytesWritten;
+  uint8_t lastI2CStatus;
+  uint8_t reserved[TELEMETRY_PACKET_SIZE - 6 - sizeof(uint16_t) -
+                   sizeof(uint8_t) - sizeof(GPSData) - sizeof(BMPData) -
+                   sizeof(MagnetometerData) - sizeof(InertialData) -
+                   sizeof(uint8_t) - sizeof(uint8_t)];
 };
 
 static_assert(sizeof(TelemetryData) == TELEMETRY_PACKET_SIZE,
@@ -64,20 +96,81 @@ Adafruit_ISM330DHCX ism330dhcx;
 SFE_UBLOX_GNSS myGNSS;
 
 TelemetryData telemetry;
+uint16_t nextPacketCounter = 0;
 volatile bool can_blink = false;
 
 volatile unsigned long time_of_last_pps = 0;
+unsigned long time_of_last_gps_update = 0;
 
- // Only ever change this variable. Everything else should already be set.
+// Only ever change this variable. Everything else should already be set.
 const int pps_delay = 0;
 // It is the time (milliseconds) that Jacob's board waits from the last PPS
 
 uint8_t *telemetryBytes() { return reinterpret_cast<uint8_t *>(&telemetry); }
 
-void sendTelemetryPacket(uint8_t address) {
-  Wire.beginTransmission(address);
-  Wire.write(telemetryBytes(), sizeof(telemetry));
-  Wire.endTransmission();
+void setValidityFlag(uint8_t flag, bool valid) {
+  if (valid) {
+    telemetry.validity |= flag;
+  } else {
+    telemetry.validity &= ~flag;
+  }
+}
+
+void refreshGPSValidity() {
+  setValidityFlag(VALIDITY_GPS,
+                  time_of_last_gps_update != 0 &&
+                      millis() - time_of_last_gps_update <= GPS_VALID_TIMEOUT_MS);
+}
+
+uint8_t checksumI2CPayload(const uint8_t *payload, size_t payloadSize) {
+  uint8_t checksum = 0;
+  for (size_t index = 0; index < payloadSize; index++) {
+    checksum += payload[index];
+  }
+  return checksum;
+}
+
+uint8_t sendTelemetryPacket(uint8_t destinationFlags) {
+  telemetry.packetCounter = nextPacketCounter++;
+
+  uint8_t *bytes = telemetryBytes();
+  size_t totalBytesWritten = 0;
+  uint8_t finalStatus = I2C_STATUS_SUCCESS;
+
+  for (size_t offset = 0; offset < sizeof(telemetry);
+       offset += I2C_FRAME_PAYLOAD_SIZE) {
+    size_t bytesRemaining = sizeof(telemetry) - offset;
+    size_t payloadSize = bytesRemaining < I2C_FRAME_PAYLOAD_SIZE
+                             ? bytesRemaining
+                             : I2C_FRAME_PAYLOAD_SIZE;
+    uint8_t frameFlags = destinationFlags;
+    if (offset == 0) {
+      frameFlags |= I2C_FRAME_START;
+    }
+
+    Wire.beginTransmission(I2C_BROADCAST_ADDRESS);
+    size_t bytesWritten = Wire.write(frameFlags);
+    bytesWritten += Wire.write(checksumI2CPayload(bytes + offset, payloadSize));
+    bytesWritten += Wire.write(bytes + offset, payloadSize);
+    totalBytesWritten += bytesWritten;
+
+    if (bytesWritten != payloadSize + I2C_FRAME_HEADER_SIZE) {
+      Wire.endTransmission();
+      finalStatus = I2C_STATUS_SHORT_WRITE;
+      break;
+    }
+
+    finalStatus = Wire.endTransmission();
+    if (finalStatus != I2C_STATUS_SUCCESS) {
+      break;
+    }
+  }
+
+  telemetry.lastI2CBytesWritten = totalBytesWritten > UINT8_MAX
+                                      ? UINT8_MAX
+                                      : totalBytesWritten;
+  telemetry.lastI2CStatus = finalStatus;
+  return finalStatus;
 }
 
 void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct) {
@@ -93,6 +186,8 @@ void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct) {
   telemetry.gps.nedDownVel = myGNSS.getNedDownVel();
   telemetry.gps.nedEastVel = myGNSS.getNedEastVel();
   telemetry.gps.unixEpoch = myGNSS.getUnixEpoch();
+  time_of_last_gps_update = millis();
+  setValidityFlag(VALIDITY_GPS, true);
 
   digitalWrite(BUILTIN_LED_PIN, LOW);
 }
@@ -108,6 +203,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PPS_PIN), handleInterrupt, RISING);
 
   memcpy(telemetry.callsign, "KJ5NPP", sizeof(telemetry.callsign));
+  telemetry.lastI2CStatus = I2C_STATUS_SUCCESS;
 
   Wire.begin();
   Wire.setClock(400000);
@@ -164,12 +260,16 @@ void loop() {
   if (bmp.performReading()) {
     telemetry.bmp.temperature = bmp.temperature;
     telemetry.bmp.pressure = bmp.pressure;
+    setValidityFlag(VALIDITY_BMP, true);
+  } else {
+    setValidityFlag(VALIDITY_BMP, false);
   }
 
   lis3mdl.read();
   telemetry.magnetometer.x = lis3mdl.x;
   telemetry.magnetometer.y = lis3mdl.y;
   telemetry.magnetometer.z = lis3mdl.z;
+  setValidityFlag(VALIDITY_MAGNETOMETER, true);
 
   sensors_event_t accel;
   sensors_event_t gyro;
@@ -183,15 +283,19 @@ void loop() {
     telemetry.inertial.gyroY = gyro.gyro.y;
     telemetry.inertial.gyroX = gyro.gyro.x;
     telemetry.inertial.temperature = temp.temperature;
+    setValidityFlag(VALIDITY_INERTIAL, true);
+  } else {
+    setValidityFlag(VALIDITY_INERTIAL, false);
   }
 
   myGNSS.checkUblox();
+  refreshGPSValidity();
 
-  sendTelemetryPacket(0xAA);
+  sendTelemetryPacket(I2C_FRAME_DESTINATION_SD);
 
   if (millis() - time_of_last_pps > 550 + pps_delay && can_blink) {
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-    sendTelemetryPacket(0xBB);
+    sendTelemetryPacket(I2C_FRAME_DESTINATION_RADIO);
     can_blink = 0;
   }
 }
