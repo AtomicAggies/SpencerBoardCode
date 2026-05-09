@@ -8,6 +8,10 @@
 
 #define LED_PIN 3
 #define PPS_PIN 15
+// Set GPS_INT_PIN to the Teensy pin wired to the GPS INT/data-ready pin.
+// Leave it at -1 while the INT line is not soldered; GPS servicing will then
+// fall back to a timed non-blocking poll.
+#define GPS_INT_PIN -1
 #define BUZZER_PIN 14
 #define BUILTIN_LED_PIN 13
 
@@ -18,6 +22,8 @@ const uint8_t I2C_FRAME_HEADER_SIZE = 2;
 const uint8_t I2C_FRAME_PAYLOAD_SIZE =
     I2C_FRAME_MAX_SIZE - I2C_FRAME_HEADER_SIZE;
 const unsigned long GPS_VALID_TIMEOUT_MS = 2000;
+const unsigned long GPS_POLL_INTERVAL_MS = 20;
+const uint8_t GPS_NAVIGATION_FREQUENCY_HZ = 10;
 
 // I2C frame header byte 0:
 //   bit 0: frame is intended for the SD-card receiver
@@ -98,9 +104,11 @@ SFE_UBLOX_GNSS myGNSS;
 TelemetryData telemetry;
 uint16_t nextPacketCounter = 0;
 volatile bool can_blink = false;
+volatile bool gps_service_requested = true;
 
 volatile unsigned long time_of_last_pps = 0;
 unsigned long time_of_last_gps_update = 0;
+unsigned long time_of_last_gps_poll = 0;
 
 // Only ever change this variable. Everything else should already be set.
 const int pps_delay = 0;
@@ -117,9 +125,9 @@ void setValidityFlag(uint8_t flag, bool valid) {
 }
 
 void refreshGPSValidity() {
-  setValidityFlag(VALIDITY_GPS,
-                  time_of_last_gps_update != 0 &&
-                      millis() - time_of_last_gps_update <= GPS_VALID_TIMEOUT_MS);
+  setValidityFlag(VALIDITY_GPS, time_of_last_gps_update != 0 &&
+                                    millis() - time_of_last_gps_update <=
+                                        GPS_VALID_TIMEOUT_MS);
 }
 
 uint8_t checksumI2CPayload(const uint8_t *payload, size_t payloadSize) {
@@ -166,9 +174,8 @@ uint8_t sendTelemetryPacket(uint8_t destinationFlags) {
     }
   }
 
-  telemetry.lastI2CBytesWritten = totalBytesWritten > UINT8_MAX
-                                      ? UINT8_MAX
-                                      : totalBytesWritten;
+  telemetry.lastI2CBytesWritten =
+      totalBytesWritten > UINT8_MAX ? UINT8_MAX : totalBytesWritten;
   telemetry.lastI2CStatus = finalStatus;
   return finalStatus;
 }
@@ -179,17 +186,47 @@ void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct) {
   // Pulse the builtin LED if we get a callback from the GPS
   digitalWrite(BUILTIN_LED_PIN, HIGH);
 
-  telemetry.gps.latitude = myGNSS.getLatitude();
-  telemetry.gps.longitude = myGNSS.getLongitude();
-  telemetry.gps.altitude = myGNSS.getAltitude();
-  telemetry.gps.nedNorthVel = myGNSS.getNedNorthVel();
-  telemetry.gps.nedDownVel = myGNSS.getNedDownVel();
-  telemetry.gps.nedEastVel = myGNSS.getNedEastVel();
-  telemetry.gps.unixEpoch = myGNSS.getUnixEpoch();
+  telemetry.gps.latitude = myGNSS.getLatitude(0);
+  telemetry.gps.longitude = myGNSS.getLongitude(0);
+  telemetry.gps.altitude = myGNSS.getAltitude(0);
+  telemetry.gps.nedNorthVel = myGNSS.getNedNorthVel(0);
+  telemetry.gps.nedDownVel = myGNSS.getNedDownVel(0);
+  telemetry.gps.nedEastVel = myGNSS.getNedEastVel(0);
+  telemetry.gps.unixEpoch = myGNSS.getUnixEpoch(0);
   time_of_last_gps_update = millis();
   setValidityFlag(VALIDITY_GPS, true);
 
   digitalWrite(BUILTIN_LED_PIN, LOW);
+}
+
+void serviceGPS(bool force = false) {
+  unsigned long now = millis();
+  bool pollIntervalElapsed =
+      now - time_of_last_gps_poll >= GPS_POLL_INTERVAL_MS;
+
+  if (!force && !gps_service_requested && !pollIntervalElapsed) {
+    return;
+  }
+
+  gps_service_requested = false;
+  time_of_last_gps_poll = now;
+
+  // checkUblox reads any waiting bytes. checkCallbacks dispatches AutoPVT
+  // callbacks. getPVT(0) is a non-blocking fallback for boards where the GPS
+  // INT line is absent or no callback fires despite a fresh auto-PVT packet.
+  myGNSS.checkUblox();
+  myGNSS.checkCallbacks();
+  if (myGNSS.getPVT(0)) {
+    saveGPSData(nullptr);
+  }
+}
+
+void configureGPSInterrupt() {
+#if GPS_INT_PIN >= 0
+  pinMode(GPS_INT_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(GPS_INT_PIN), handleGPSInterrupt,
+                  FALLING);
+#endif
 }
 
 void setup() {
@@ -201,6 +238,7 @@ void setup() {
   digitalWrite(BUILTIN_LED_PIN, LOW);
 
   attachInterrupt(digitalPinToInterrupt(PPS_PIN), handleInterrupt, RISING);
+  configureGPSInterrupt();
 
   memcpy(telemetry.callsign, "KJ5NPP", sizeof(telemetry.callsign));
   telemetry.lastI2CStatus = I2C_STATUS_SUCCESS;
@@ -250,8 +288,11 @@ void setup() {
     delay(500);
   }
 
-  myGNSS.setAutoPVT(true);
+  myGNSS.setI2COutput(COM_TYPE_UBX);
+  myGNSS.setNavigationFrequency(GPS_NAVIGATION_FREQUENCY_HZ);
+  myGNSS.setAutoPVT(true, false);
   myGNSS.setAutoPVTcallbackPtr(saveGPSData);
+  serviceGPS(true);
 
   digitalWrite(LED_PIN, LOW);
 }
@@ -288,7 +329,7 @@ void loop() {
     setValidityFlag(VALIDITY_INERTIAL, false);
   }
 
-  myGNSS.checkUblox();
+  serviceGPS();
   refreshGPSValidity();
 
   sendTelemetryPacket(I2C_FRAME_DESTINATION_SD);
@@ -299,6 +340,8 @@ void loop() {
     can_blink = 0;
   }
 }
+
+void handleGPSInterrupt(void) { gps_service_requested = true; }
 
 void handleInterrupt(void) {
   time_of_last_pps = millis();
