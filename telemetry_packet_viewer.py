@@ -55,31 +55,30 @@ I2C_STATUS_MESSAGES = {
 }
 
 FIELD_SPECS = [
-    ("Callsign", 0, 6, "6s", "ASCII callsign", None),
-    ("Packet Counter", 6, 2, "<H", "uint16, rolls over after 65535", None),
-    ("Validity Flags", 8, 1, "<B", "bit 0 GPS, bit 1 BMP, bit 2 mag, bit 3 IMU", None),
-    ("GPS Latitude", 9, 4, "<i", "degrees = raw / 1e7", "gps"),
-    ("GPS Longitude", 13, 4, "<i", "degrees = raw / 1e7", "gps"),
-    ("GPS Altitude", 17, 4, "<i", "millimeters", "gps"),
-    ("GPS NED North Velocity", 21, 4, "<i", "millimeters/second", "gps"),
-    ("GPS NED Down Velocity", 25, 4, "<i", "millimeters/second", "gps"),
-    ("GPS NED East Velocity", 29, 4, "<i", "millimeters/second", "gps"),
-    ("GPS Unix Epoch", 33, 4, "<I", "seconds since 1970-01-01 UTC", "gps"),
-    ("BMP Temperature", 37, 4, "<f", "degrees C", "bmp"),
-    ("BMP Pressure", 41, 4, "<f", "pascals", "bmp"),
-    ("Magnetometer X", 45, 2, "<h", "raw int16", "magnetometer"),
-    ("Magnetometer Y", 47, 2, "<h", "raw int16", "magnetometer"),
-    ("Magnetometer Z", 49, 2, "<h", "raw int16", "magnetometer"),
-    ("Accel X", 51, 4, "<f", "m/s^2", "inertial"),
-    ("Accel Y", 55, 4, "<f", "m/s^2", "inertial"),
-    ("Accel Z", 59, 4, "<f", "m/s^2", "inertial"),
-    ("Gyro Z", 63, 4, "<f", "rad/s", "inertial"),
-    ("Gyro Y", 67, 4, "<f", "rad/s", "inertial"),
-    ("Gyro X", 71, 4, "<f", "rad/s", "inertial"),
-    ("IMU Temperature", 75, 4, "<f", "degrees C", "inertial"),
-    ("Previous I2C Bytes Written", 79, 1, "<B", "previous framed I2C send", None),
-    ("Previous I2C Status", 80, 1, "<B", "previous Wire.endTransmission/status", None),
-    ("Reserved", 81, 17, None, "padding/reserved bytes", None),
+    ("Packet Counter", 0, 2, "<H", "uint16, rolls over after 65535", None),
+    ("Validity Flags", 2, 1, "<B", "bit 0 GPS, bit 1 BMP, bit 2 mag, bit 3 IMU", None),
+    ("GPS Latitude", 3, 4, "<i", "degrees = raw / 1e7", "gps"),
+    ("GPS Longitude", 7, 4, "<i", "degrees = raw / 1e7", "gps"),
+    ("GPS Altitude", 11, 4, "<i", "millimeters", "gps"),
+    ("GPS NED North Velocity", 15, 4, "<i", "millimeters/second", "gps"),
+    ("GPS NED Down Velocity", 19, 4, "<i", "millimeters/second", "gps"),
+    ("GPS NED East Velocity", 23, 4, "<i", "millimeters/second", "gps"),
+    ("GPS Unix Epoch", 27, 4, "<I", "seconds since 1970-01-01 UTC", "gps"),
+    ("BMP Temperature", 31, 4, "<f", "degrees C", "bmp"),
+    ("BMP Pressure", 35, 4, "<f", "pascals", "bmp"),
+    ("Magnetometer X", 39, 2, "<h", "raw int16", "magnetometer"),
+    ("Magnetometer Y", 41, 2, "<h", "raw int16", "magnetometer"),
+    ("Magnetometer Z", 43, 2, "<h", "raw int16", "magnetometer"),
+    ("Accel X", 45, 4, "<f", "m/s^2", "inertial"),
+    ("Accel Y", 49, 4, "<f", "m/s^2", "inertial"),
+    ("Accel Z", 53, 4, "<f", "m/s^2", "inertial"),
+    ("Gyro Z", 57, 4, "<f", "rad/s", "inertial"),
+    ("Gyro Y", 61, 4, "<f", "rad/s", "inertial"),
+    ("Gyro X", 65, 4, "<f", "rad/s", "inertial"),
+    ("IMU Temperature", 69, 4, "<f", "degrees C", "inertial"),
+    ("Previous I2C Bytes Written", 73, 1, "<B", "previous framed I2C send", None),
+    ("Previous I2C Status", 74, 1, "<B", "previous Wire.endTransmission/status", None),
+    ("Reserved", 75, 23, None, "padding/reserved bytes", None),
 ]
 
 HEX_TEXT_RE = re.compile(rb"^[0-9a-fA-F\s]+$")
@@ -107,8 +106,6 @@ def _format_validity_flags(raw_value: int) -> str:
 
 
 def _format_decoded_value(name: str, raw_value):
-    if name == "Callsign":
-        return raw_value.rstrip(b"\x00").decode("ascii", errors="replace")
     if name == "Packet Counter":
         return str(raw_value)
     if name == "Validity Flags":
@@ -144,7 +141,7 @@ def decode_packet(packet: bytes):
     if len(packet) != PACKET_SIZE:
         raise ValueError(f"Expected {PACKET_SIZE} bytes, got {len(packet)} bytes")
 
-    validity = struct.unpack_from("<B", packet, 8)[0]
+    validity = struct.unpack_from("<B", packet, 2)[0]
     for name, offset, size, fmt, notes, sensor_key in FIELD_SPECS:
         raw_bytes = packet[offset : offset + size]
         if fmt is None:

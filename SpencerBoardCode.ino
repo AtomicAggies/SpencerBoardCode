@@ -78,7 +78,6 @@ struct __attribute__((packed)) InertialData {
 };
 
 struct __attribute__((packed)) TelemetryData {
-  char callsign[6];
   uint16_t packetCounter;
   uint8_t validity;
   GPSData gps;
@@ -87,7 +86,7 @@ struct __attribute__((packed)) TelemetryData {
   InertialData inertial;
   uint8_t lastI2CBytesWritten;
   uint8_t lastI2CStatus;
-  uint8_t reserved[TELEMETRY_PACKET_SIZE - 6 - sizeof(uint16_t) -
+  uint8_t reserved[TELEMETRY_PACKET_SIZE - sizeof(uint16_t) -
                    sizeof(uint8_t) - sizeof(GPSData) - sizeof(BMPData) -
                    sizeof(MagnetometerData) - sizeof(InertialData) -
                    sizeof(uint8_t) - sizeof(uint8_t)];
@@ -240,7 +239,6 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PPS_PIN), handleInterrupt, RISING);
   configureGPSInterrupt();
 
-  memcpy(telemetry.callsign, "KJ5NPP", sizeof(telemetry.callsign));
   telemetry.lastI2CStatus = I2C_STATUS_SUCCESS;
 
   Wire.begin();
