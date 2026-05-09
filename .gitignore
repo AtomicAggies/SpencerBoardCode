@@ -1,1 +1,34 @@
 .vscode/
+*.tmp
+*.temp
+*.swp
+*.bak
+*.orig
+Thumbs.db
+Desktop.ini
+
+# Python cache and environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Build/test outputs
+build/
+dist/
+out/
+tmp/
+
+# Arduino / embedded generated artifacts
+*.elf
+*.hex
+*.bin
+*.map
+*.eep
+*.lst
