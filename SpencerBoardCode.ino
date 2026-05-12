@@ -16,7 +16,8 @@
 #define BUZZER_PIN 14
 #define BUILTIN_LED_PIN 13
 
-const uint8_t I2C_BROADCAST_ADDRESS = 0x00;
+const uint8_t I2C_ABRAHAM_ADDRESS = 0x09;
+const uint8_t I2C_JACOB_ADDRESS = 0x08;
 const uint8_t I2C_FRAME_MAX_SIZE = 32;
 const uint8_t I2C_FRAME_HEADER_SIZE = 2;
 const uint8_t I2C_FRAME_PAYLOAD_SIZE =
@@ -83,12 +84,16 @@ uint8_t checksumI2CPayload(const uint8_t *payload, size_t payloadSize) {
   return checksum;
 }
 
-uint8_t sendTelemetryPacket(uint8_t destinationFlags) {
-  // Blink the LED if we're sending a packet.
-  digitalWrite(LED_PIN, HIGH);
-
+/** Call once before one or more sendTelemetryPacket() calls for the same snapshot. */
+void prepareTelemetryForI2CSend() {
   telemetry.wireLength = sizeof(TelemetryData);
   telemetry.packetCounter = nextPacketCounter++;
+}
+
+/** Send current telemetry buffer as framed chunks to one I2C slave (7-bit address). */
+uint8_t sendTelemetryPacket(uint8_t slave7Address, uint8_t destinationFlags) {
+  // Blink the LED if we're sending a packet.
+  digitalWrite(LED_PIN, HIGH);
 
   uint8_t *bytes = telemetryBytes();
   size_t totalBytesWritten = 0;
@@ -105,9 +110,10 @@ uint8_t sendTelemetryPacket(uint8_t destinationFlags) {
       frameFlags |= I2C_FRAME_START;
     }
 
-    Wire.beginTransmission(I2C_BROADCAST_ADDRESS);
+    Wire.beginTransmission(slave7Address);
     size_t bytesWritten = Wire.write(frameFlags);
-    bytesWritten += Wire.write(checksumI2CPayload(bytes + offset, payloadSize));
+    uint8_t payloadChecksum = checksumI2CPayload(bytes + offset, payloadSize);
+    bytesWritten += Wire.write(payloadChecksum);
     bytesWritten += Wire.write(bytes + offset, payloadSize);
     totalBytesWritten += bytesWritten;
 
@@ -282,9 +288,13 @@ void loop() {
   serviceGPS();
   refreshGPSValidity();
 
-  // High-rate broadcast for SD (and Jacob): destination SD only. Jacob
-  // accepts SD-flagged frames; optional RADIO-only burst below is redundant.
-  sendTelemetryPacket(I2C_FRAME_DESTINATION_SD);
+  prepareTelemetryForI2CSend();
+  uint8_t statusAbraham =
+      sendTelemetryPacket(I2C_ABRAHAM_ADDRESS, I2C_FRAME_DESTINATION_SD);
+  uint8_t statusJacob =
+      sendTelemetryPacket(I2C_JACOB_ADDRESS, I2C_FRAME_DESTINATION_SD);
+  telemetry.lastI2CStatus =
+      (statusAbraham != I2C_STATUS_SUCCESS) ? statusAbraham : statusJacob;
 }
 
 void handleGPSInterrupt(void) { gps_service_requested = true; }

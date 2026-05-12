@@ -39,7 +39,7 @@ All receivers follow the same assembly behavior:
               |  telemetry packet |
               +---------+---------+
                         |
-                 framed I2C broadcast/general-call style
+                 framed I2C to 0x09 (Abraham) and 0x08 (Jacob)
                         |
         +---------------+----------------+
         |                                |
