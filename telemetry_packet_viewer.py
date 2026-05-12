@@ -66,10 +66,11 @@ LEGACY_DECODE_FORMATS = frozenset(
 MAX_AUTO_PAYLOAD_SIZE = 256
 
 VALIDITY_FLAGS = {
-    "gps": (1 << 0, "GPS"),
+    "gps": (1 << 0, "GPS position/velocity"),
     "bmp": (1 << 1, "BMP"),
     "magnetometer": (1 << 2, "Magnetometer"),
     "inertial": (1 << 3, "Inertial/IMU"),
+    "gps_unix": (1 << 4, "GPS Unix epoch"),
 }
 
 I2C_STATUS_MESSAGES = {
@@ -86,14 +87,14 @@ I2C_STATUS_MESSAGES = {
 FIELD_SPECS = [
     ("Wire length", 0, 1, "<B", "total bytes in this record on SD/I2C, including this byte", None),
     ("Packet Counter", 1, 2, "<H", "uint16, rolls over after 65535", None),
-    ("Validity Flags", 3, 1, "<B", "bit 0 GPS, bit 1 BMP, bit 2 mag, bit 3 IMU", None),
+    ("Validity Flags", 3, 1, "<B", "bit0 GPS LLH, bit1 BMP, bit2 mag, bit3 IMU, bit4 GPS unix", None),
     ("GPS Latitude", 4, 4, "<i", "degrees = raw / 1e7", "gps"),
     ("GPS Longitude", 8, 4, "<i", "degrees = raw / 1e7", "gps"),
     ("GPS Altitude", 12, 4, "<i", "millimeters", "gps"),
     ("GPS NED North Velocity", 16, 4, "<i", "millimeters/second", "gps"),
     ("GPS NED Down Velocity", 20, 4, "<i", "millimeters/second", "gps"),
     ("GPS NED East Velocity", 24, 4, "<i", "millimeters/second", "gps"),
-    ("GPS Unix Epoch", 28, 4, "<I", "seconds since 1970-01-01 UTC", "gps"),
+    ("GPS Unix Epoch", 28, 4, "<I", "seconds since 1970-01-01 UTC", "gps_unix"),
     ("BMP Temperature", 32, 4, "<f", "degrees C", "bmp"),
     ("BMP Pressure", 36, 4, "<f", "pascals", "bmp"),
     ("Magnetometer X", 40, 2, "<h", "raw int16", "magnetometer"),

@@ -70,10 +70,13 @@ void setValidityFlag(uint8_t flag, bool valid) {
   }
 }
 
+/** Clears stale GPS flags; saveGPSData sets them from fresh PVT. */
 void refreshGPSValidity() {
-  setValidityFlag(VALIDITY_GPS, time_of_last_gps_update != 0 &&
-                                    millis() - time_of_last_gps_update <=
-                                        GPS_VALID_TIMEOUT_MS);
+  if (time_of_last_gps_update == 0 ||
+      millis() - time_of_last_gps_update > GPS_VALID_TIMEOUT_MS) {
+    setValidityFlag(VALIDITY_GPS, false);
+    setValidityFlag(VALIDITY_GPS_UNIX_EPOCH, false);
+  }
 }
 
 uint8_t checksumI2CPayload(const uint8_t *payload, size_t payloadSize) {
@@ -149,9 +152,29 @@ void saveGPSData(UBX_NAV_PVT_data_t *ubxDataStruct) {
   telemetry.gps.nedNorthVel = myGNSS.getNedNorthVel(0);
   telemetry.gps.nedDownVel = myGNSS.getNedDownVel(0);
   telemetry.gps.nedEastVel = myGNSS.getNedEastVel(0);
-  telemetry.gps.unixEpoch = myGNSS.getUnixEpoch(0);
+
+  // Unix: valid only when PVT marks UTC date+time valid and epoch is in range.
+  const bool dateTimeOk =
+      myGNSS.getDateValid(0) && myGNSS.getTimeValid(0);
+  uint32_t epoch = 0;
+  if (dateTimeOk) {
+    epoch = myGNSS.getUnixEpoch(0);
+  }
+  telemetry.gps.unixEpoch = epoch;
+
   time_of_last_gps_update = millis();
-  setValidityFlag(VALIDITY_GPS, true);
+
+  constexpr uint32_t kMinPlausibleUnix = 946684800UL;   // 2000-01-01 UTC
+  constexpr uint32_t kMaxPlausibleUnix = 4102444800UL;  // ~2099
+  const bool epochOk = dateTimeOk && epoch >= kMinPlausibleUnix &&
+                       epoch <= kMaxPlausibleUnix;
+  setValidityFlag(VALIDITY_GPS_UNIX_EPOCH, epochOk);
+
+  // Position / nav block: receiver reports useful LLH (independent of unix flag).
+  const uint8_t fixType = myGNSS.getFixType(0);
+  const bool posOk = myGNSS.getGnssFixOk(0) ||
+                     (fixType >= 2 && fixType <= 4);  // 2D/3D/GNSS+DR, not time-only
+  setValidityFlag(VALIDITY_GPS, posOk);
 
   digitalWrite(BUILTIN_LED_PIN, LOW);
 }
@@ -292,7 +315,7 @@ void loop() {
   uint8_t statusAbraham =
       sendTelemetryPacket(I2C_ABRAHAM_ADDRESS, I2C_FRAME_DESTINATION_SD);
   uint8_t statusJacob =
-      sendTelemetryPacket(I2C_JACOB_ADDRESS, I2C_FRAME_DESTINATION_SD);
+      sendTelemetryPacket(I2C_JACOB_ADDRESS, I2C_FRAME_DESTINATION_RADIO);
   telemetry.lastI2CStatus =
       (statusAbraham != I2C_STATUS_SUCCESS) ? statusAbraham : statusJacob;
 }

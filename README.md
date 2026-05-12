@@ -73,6 +73,25 @@ bit7  bit1  bit0
 - `serviceGPS()` also performs non-blocking fallback polling (`getPVT(0)`).
 - GPS validity clears when update age exceeds timeout window.
 
+## Debug guide
+
+### Status LEDs (Teensy)
+
+| Signal | Pin | Meaning |
+|--------|-----|---------|
+| **I2C / activity LED** | **3** | Driven **HIGH** for the duration of each `sendTelemetryPacket()` burst (framed I2C writes to Abraham and/or Jacob), **LOW** when idle between bursts. |
+| **Built-in LED** | **13** (`LED_BUILTIN`) | Short flash on each GPS PVT update in `saveGPSData()`. During boot, pin 3 or pin 13 may toggle while waiting for BMP, magnetometer, IMU, or GNSS to initialize. |
+| **PPS** | **15** (input, pull-up) | Not an LED: GPS pulse-per-second. On each rising edge, `handleInterrupt()` pulls **pin 3 LOW**. |
+
+### UART / serial
+
+This sketch does **not** open `Serial` or `Serial1`; there is no live UART log unless you add it.
+
+- **USB**: Use the Teensy USB connection and the Arduino Serial Monitor if you add `Serial.begin(...)` for temporary prints.
+- **External USB–UART on Serial1 (Teensy 4.x)**: Use a **3.3 V** logic adapter only. Wiring is **GND**, **RX from the adapter to Teensy TX1 (pin 1)**, and **TX from the adapter to Teensy RX1 (pin 0)**. Typical baud is **115200** if you match Jacob’s console.
+
+Never connect 5 V TTL UART lines directly to Teensy I/O.
+
 ## Tooling
 
 - `telemetry_packet_viewer.py` decodes Spencer 98-byte packet logs and supports raw or terminated record formats.
