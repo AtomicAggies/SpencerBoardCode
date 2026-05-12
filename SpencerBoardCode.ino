@@ -5,6 +5,7 @@
 #include <SPI.h>
 #include <SparkFun_u-blox_GNSS_v3.h>
 #include <Wire.h>
+#include <TelemetryData.h>
 
 #define LED_PIN 3
 #define PPS_PIN 15
@@ -37,59 +38,8 @@ const uint8_t I2C_FRAME_DESTINATION_BOTH =
     I2C_FRAME_DESTINATION_SD | I2C_FRAME_DESTINATION_RADIO;
 const uint8_t I2C_FRAME_START = 1 << 7;
 
-const uint8_t VALIDITY_GPS = 1 << 0;
-const uint8_t VALIDITY_BMP = 1 << 1;
-const uint8_t VALIDITY_MAGNETOMETER = 1 << 2;
-const uint8_t VALIDITY_INERTIAL = 1 << 3;
-
 const uint8_t I2C_STATUS_SUCCESS = 0;
 const uint8_t I2C_STATUS_SHORT_WRITE = 0xFE;
-
-struct __attribute__((packed)) GPSData {
-  int32_t latitude;
-  int32_t longitude;
-  int32_t altitude;
-  int32_t nedNorthVel;
-  int32_t nedDownVel;
-  int32_t nedEastVel;
-  uint32_t unixEpoch;
-};
-
-struct __attribute__((packed)) BMPData {
-  float temperature;
-  float pressure;
-};
-
-struct __attribute__((packed)) MagnetometerData {
-  int16_t x;
-  int16_t y;
-  int16_t z;
-};
-
-struct __attribute__((packed)) InertialData {
-  float temperature;
-  float gyroX;
-  float gyroY;
-  float gyroZ;
-  float accelX;
-  float accelY;
-  float accelZ;
-};
-
-struct __attribute__((packed)) TelemetryData {
-  uint16_t packetCounter;
-  uint8_t validity;
-  GPSData gps;
-  BMPData bmp;
-  MagnetometerData magnetometer;
-  InertialData inertial;
-  uint8_t lastI2CBytesWritten;
-  uint8_t lastI2CStatus;
-};
-
-static_assert(sizeof(TelemetryData) == 75,
-              "TelemetryData must be 75 bytes; update I2C/LoRa peers if layout changes");
-const uint8_t TELEMETRY_PACKET_SIZE = sizeof(TelemetryData);
 
 Adafruit_BMP5xx bmp;
 Adafruit_LIS3MDL lis3mdl = Adafruit_LIS3MDL();
@@ -134,6 +84,10 @@ uint8_t checksumI2CPayload(const uint8_t *payload, size_t payloadSize) {
 }
 
 uint8_t sendTelemetryPacket(uint8_t destinationFlags) {
+  // Blink the LED if we're sending a packet.
+  digitalWrite(LED_PIN, HIGH);
+
+  telemetry.wireLength = sizeof(TelemetryData);
   telemetry.packetCounter = nextPacketCounter++;
 
   uint8_t *bytes = telemetryBytes();
@@ -172,6 +126,8 @@ uint8_t sendTelemetryPacket(uint8_t destinationFlags) {
   telemetry.lastI2CBytesWritten =
       totalBytesWritten > UINT8_MAX ? UINT8_MAX : totalBytesWritten;
   telemetry.lastI2CStatus = finalStatus;
+
+  digitalWrite(LED_PIN, LOW);
   return finalStatus;
 }
 
@@ -326,13 +282,9 @@ void loop() {
   serviceGPS();
   refreshGPSValidity();
 
+  // High-rate broadcast for SD (and Jacob): destination SD only. Jacob
+  // accepts SD-flagged frames; optional RADIO-only burst below is redundant.
   sendTelemetryPacket(I2C_FRAME_DESTINATION_SD);
-
-  if (millis() - time_of_last_pps > 550 + pps_delay && can_blink) {
-    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-    sendTelemetryPacket(I2C_FRAME_DESTINATION_RADIO);
-    can_blink = 0;
-  }
 }
 
 void handleGPSInterrupt(void) { gps_service_requested = true; }

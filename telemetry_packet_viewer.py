@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""GUI viewer for Spencer Board 98-byte telemetry packets.
+"""GUI viewer for Spencer Board telemetry SD logs.
 
-Open either the raw binary SD-card log or a text file containing hexadecimal bytes.
-The viewer displays one packet at a time with the complete packet hex and a table
-of decoded fields based on the packet layout in SpencerBoardCode.ino.
+Supports length-prefixed records (byte 0 = total record size including itself),
+matching TelemetryData.h (max 76 bytes for the current struct). LoRa does not
+include this byte; SD / I2C binary logs do.
+
+Also supports legacy fixed 98-byte records for older logs.
 """
 
 import argparse
@@ -14,28 +16,54 @@ import struct
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-PACKET_SIZE = 98
+# Must match TelemetryData.h (wireLength + rest; full struct).
+TELEMETRY_WIRE_LENGTH_MAX = 76
+LEGACY_PACKET_SIZE = 98
+
 RECORD_FORMAT_AUTO = "auto"
-RECORD_FORMAT_RAW = "raw"
-RECORD_FORMAT_LF = "lf"
-RECORD_FORMAT_CR = "cr"
-RECORD_FORMAT_CRLF = "crlf"
+RECORD_FORMAT_LEN_RAW = "len_raw"
+RECORD_FORMAT_LEN_LF = "len_lf"
+RECORD_FORMAT_LEN_CR = "len_cr"
+RECORD_FORMAT_LEN_CRLF = "len_crlf"
+RECORD_FORMAT_FIXED98_RAW = "fixed98_raw"
+RECORD_FORMAT_FIXED98_LF = "fixed98_lf"
+RECORD_FORMAT_FIXED98_CR = "fixed98_cr"
+RECORD_FORMAT_FIXED98_CRLF = "fixed98_crlf"
+
 RECORD_FORMAT_LABELS = {
     "Auto detect": RECORD_FORMAT_AUTO,
-    "Raw 98-byte packets": RECORD_FORMAT_RAW,
-    "LF/newline terminated (98 + 0A)": RECORD_FORMAT_LF,
-    "CR terminated (98 + 0D)": RECORD_FORMAT_CR,
-    "CRLF terminated (98 + 0D0A)": RECORD_FORMAT_CRLF,
+    "Raw length-prefixed (byte0=len, concatenated)": RECORD_FORMAT_LEN_RAW,
+    "LF after each record (len + payload + 0A)": RECORD_FORMAT_LEN_LF,
+    "CR after each record (len + payload + 0D)": RECORD_FORMAT_LEN_CR,
+    "CRLF after each record (len + payload + 0D0A)": RECORD_FORMAT_LEN_CRLF,
+    "Legacy raw 98-byte packets": RECORD_FORMAT_FIXED98_RAW,
+    "Legacy LF (98 + 0A)": RECORD_FORMAT_FIXED98_LF,
+    "Legacy CR (98 + 0D)": RECORD_FORMAT_FIXED98_CR,
+    "Legacy CRLF (98 + 0D0A)": RECORD_FORMAT_FIXED98_CRLF,
 }
 RECORD_FORMAT_DISPLAY = {value: label for label, value in RECORD_FORMAT_LABELS.items()}
-RECORD_TERMINATORS = {
-    RECORD_FORMAT_RAW: b"",
-    RECORD_FORMAT_LF: b"\n",
-    RECORD_FORMAT_CR: b"\r",
-    RECORD_FORMAT_CRLF: b"\r\n",
-}
-MAX_AUTO_PAYLOAD_SIZE = 256
 
+LEGACY_TERMINATORS = {
+    RECORD_FORMAT_FIXED98_LF: b"\n",
+    RECORD_FORMAT_FIXED98_CR: b"\r",
+    RECORD_FORMAT_FIXED98_CRLF: b"\r\n",
+}
+LEN_TERMINATORS = {
+    RECORD_FORMAT_LEN_LF: b"\n",
+    RECORD_FORMAT_LEN_CR: b"\r",
+    RECORD_FORMAT_LEN_CRLF: b"\r\n",
+}
+
+LEGACY_DECODE_FORMATS = frozenset(
+    {
+        RECORD_FORMAT_FIXED98_RAW,
+        RECORD_FORMAT_FIXED98_LF,
+        RECORD_FORMAT_FIXED98_CR,
+        RECORD_FORMAT_FIXED98_CRLF,
+    }
+)
+
+MAX_AUTO_PAYLOAD_SIZE = 256
 
 VALIDITY_FLAGS = {
     "gps": (1 << 0, "GPS"),
@@ -54,7 +82,36 @@ I2C_STATUS_MESSAGES = {
     0xFE: "short Wire.write",
 }
 
+# Current TelemetryData (wireLength first). Offsets include byte 0.
 FIELD_SPECS = [
+    ("Wire length", 0, 1, "<B", "total bytes in this record on SD/I2C, including this byte", None),
+    ("Packet Counter", 1, 2, "<H", "uint16, rolls over after 65535", None),
+    ("Validity Flags", 3, 1, "<B", "bit 0 GPS, bit 1 BMP, bit 2 mag, bit 3 IMU", None),
+    ("GPS Latitude", 4, 4, "<i", "degrees = raw / 1e7", "gps"),
+    ("GPS Longitude", 8, 4, "<i", "degrees = raw / 1e7", "gps"),
+    ("GPS Altitude", 12, 4, "<i", "millimeters", "gps"),
+    ("GPS NED North Velocity", 16, 4, "<i", "millimeters/second", "gps"),
+    ("GPS NED Down Velocity", 20, 4, "<i", "millimeters/second", "gps"),
+    ("GPS NED East Velocity", 24, 4, "<i", "millimeters/second", "gps"),
+    ("GPS Unix Epoch", 28, 4, "<I", "seconds since 1970-01-01 UTC", "gps"),
+    ("BMP Temperature", 32, 4, "<f", "degrees C", "bmp"),
+    ("BMP Pressure", 36, 4, "<f", "pascals", "bmp"),
+    ("Magnetometer X", 40, 2, "<h", "raw int16", "magnetometer"),
+    ("Magnetometer Y", 42, 2, "<h", "raw int16", "magnetometer"),
+    ("Magnetometer Z", 44, 2, "<h", "raw int16", "magnetometer"),
+    ("Accel X", 46, 4, "<f", "m/s^2", "inertial"),
+    ("Accel Y", 50, 4, "<f", "m/s^2", "inertial"),
+    ("Accel Z", 54, 4, "<f", "m/s^2", "inertial"),
+    ("Gyro Z", 58, 4, "<f", "rad/s", "inertial"),
+    ("Gyro Y", 62, 4, "<f", "rad/s", "inertial"),
+    ("Gyro X", 66, 4, "<f", "rad/s", "inertial"),
+    ("IMU Temperature", 70, 4, "<f", "degrees C", "inertial"),
+    ("Previous I2C Bytes Written", 74, 1, "<B", "previous framed I2C send", None),
+    ("Previous I2C Status", 75, 1, "<B", "previous Wire.endTransmission/status", None),
+]
+
+# Legacy 98-byte layout (no leading wireLength).
+LEGACY_FIELD_SPECS = [
     ("Packet Counter", 0, 2, "<H", "uint16, rolls over after 65535", None),
     ("Validity Flags", 2, 1, "<B", "bit 0 GPS, bit 1 BMP, bit 2 mag, bit 3 IMU", None),
     ("GPS Latitude", 3, 4, "<i", "degrees = raw / 1e7", "gps"),
@@ -110,6 +167,8 @@ def _format_decoded_value(name: str, raw_value):
         return str(raw_value)
     if name == "Validity Flags":
         return _format_validity_flags(raw_value)
+    if name == "Wire length":
+        return str(raw_value)
     if name == "GPS Latitude" or name == "GPS Longitude":
         return f"{raw_value} ({raw_value / 10_000_000:.7f}°)"
     if name == "GPS Altitude":
@@ -136,13 +195,29 @@ def _field_validity_text(validity: int, sensor_key) -> str:
     return f"Yes ({label})" if validity & flag else f"No ({label})"
 
 
-def decode_packet(packet: bytes):
+def _decode_with_specs(packet: bytes, field_specs, validity_offset: int):
     rows = []
-    if len(packet) != PACKET_SIZE:
-        raise ValueError(f"Expected {PACKET_SIZE} bytes, got {len(packet)} bytes")
-
-    validity = struct.unpack_from("<B", packet, 2)[0]
-    for name, offset, size, fmt, notes, sensor_key in FIELD_SPECS:
+    if len(packet) > validity_offset:
+        validity = struct.unpack_from("<B", packet, validity_offset)[0]
+    else:
+        validity = 0
+    for name, offset, size, fmt, notes, sensor_key in field_specs:
+        if offset >= len(packet):
+            break
+        if offset + size > len(packet):
+            raw_bytes = packet[offset:]
+            rows.append(
+                {
+                    "offset": offset,
+                    "size": len(raw_bytes),
+                    "field": name,
+                    "hex": _format_hex(raw_bytes),
+                    "decoded": "(truncated — packet ends before field completes)",
+                    "valid": _field_validity_text(validity, sensor_key),
+                    "notes": notes,
+                }
+            )
+            break
         raw_bytes = packet[offset : offset + size]
         if fmt is None:
             raw = _format_hex(raw_bytes)
@@ -164,88 +239,135 @@ def decode_packet(packet: bytes):
     return rows
 
 
+def decode_packet(packet: bytes):
+    """Length-prefixed TelemetryData (variable total size, max TELEMETRY_WIRE_LENGTH_MAX)."""
+    if len(packet) < 2:
+        raise ValueError("Packet too short (need at least wireLength + 1 byte)")
+    wire_len = packet[0]
+    if wire_len != len(packet):
+        raise ValueError(
+            f"wireLength byte is {wire_len} but buffer length is {len(packet)}"
+        )
+    if wire_len < 2 or wire_len > TELEMETRY_WIRE_LENGTH_MAX:
+        raise ValueError(
+            f"wireLength {wire_len} out of range (2..{TELEMETRY_WIRE_LENGTH_MAX})"
+        )
+    return _decode_with_specs(packet, FIELD_SPECS, validity_offset=3)
+
+
+def decode_legacy_packet(packet: bytes):
+    if len(packet) != LEGACY_PACKET_SIZE:
+        raise ValueError(
+            f"Expected legacy {LEGACY_PACKET_SIZE} bytes, got {len(packet)} bytes"
+        )
+    return _decode_with_specs(packet, LEGACY_FIELD_SPECS, validity_offset=2)
+
+
 def _looks_like_hex_text(data: bytes) -> bool:
     stripped = b"".join(data.split())
     return bool(stripped) and len(stripped) % 2 == 0 and bool(HEX_TEXT_RE.match(data))
 
 
-def _build_truncation_warning(payload_size: int, discarded_chunks):
-    if payload_size == PACKET_SIZE:
-        return None
+def _split_len_prefixed_raw(data: bytes):
+    packets = []
+    offset = 0
+    while offset < len(data):
+        if offset + 1 > len(data):
+            raise ValueError(f"Incomplete length prefix at file offset {offset}")
+        wire_len = data[offset]
+        if wire_len < 2 or wire_len > TELEMETRY_WIRE_LENGTH_MAX:
+            raise ValueError(
+                f"Invalid wireLength {wire_len} at file offset {offset} "
+                f"(expected 2..{TELEMETRY_WIRE_LENGTH_MAX})"
+            )
+        end = offset + wire_len
+        if end > len(data):
+            raise ValueError(
+                f"Incomplete record at offset {offset}: need {wire_len} bytes, "
+                f"only {len(data) - offset} available"
+            )
+        packets.append(data[offset:end])
+        offset = end
+    if offset != len(data):
+        raise ValueError(f"Trailing {len(data) - offset} byte(s) after last record")
+    return packets, []
 
-    extra_byte_count = payload_size - PACKET_SIZE
-    if all(not any(chunk) for chunk in discarded_chunks):
-        extra_description = "all discarded bytes were 00"
-    else:
-        extra_description = "some discarded bytes were non-zero"
-    return (
-        f"Detected {payload_size}-byte payloads and truncated "
-        f"{extra_byte_count} extra byte(s) from each record; {extra_description}."
-    )
+
+def _split_len_prefixed_terminated(data: bytes, terminator: bytes):
+    packets = []
+    warnings = []
+    offset = 0
+    tl = len(terminator)
+    while offset < len(data):
+        if offset + 1 > len(data):
+            raise ValueError(f"Incomplete length prefix at file offset {offset}")
+        wire_len = data[offset]
+        if wire_len < 2 or wire_len > TELEMETRY_WIRE_LENGTH_MAX:
+            raise ValueError(f"Invalid wireLength {wire_len} at file offset {offset}")
+        end = offset + wire_len
+        if end + tl > len(data):
+            raise ValueError(f"Incomplete record or missing terminator at offset {offset}")
+        if data[end : end + tl] != terminator:
+            raise ValueError(
+                f"Missing expected terminator {terminator!r} after record at offset {offset}"
+            )
+        packets.append(data[offset:end])
+        offset = end + tl
+    if offset != len(data):
+        raise ValueError("Trailing data after last terminated record")
+    return packets, warnings
 
 
-def _split_raw_records(data: bytes):
-    if len(data) % PACKET_SIZE != 0:
+def _split_fixed98_raw(data: bytes):
+    if len(data) % LEGACY_PACKET_SIZE != 0:
         raise ValueError(
-            f"Input contains {len(data)} bytes after decoding, which is not a "
-            f"multiple of {PACKET_SIZE} for {RECORD_FORMAT_DISPLAY[RECORD_FORMAT_RAW]}."
+            f"Input length {len(data)} is not a multiple of {LEGACY_PACKET_SIZE}"
         )
-    return [data[i : i + PACKET_SIZE] for i in range(0, len(data), PACKET_SIZE)], []
+    return [
+        data[i : i + LEGACY_PACKET_SIZE] for i in range(0, len(data), LEGACY_PACKET_SIZE)
+    ], []
 
 
-def _split_terminated_records(data: bytes, record_format: str, payload_size: int):
-    terminator = RECORD_TERMINATORS[record_format]
+def _split_fixed98_terminated(data: bytes, record_format: str):
+    terminator = LEGACY_TERMINATORS[record_format]
+    payload_size = LEGACY_PACKET_SIZE
     record_size = payload_size + len(terminator)
     if len(data) % record_size != 0:
         raise ValueError(
-            f"Input contains {len(data)} bytes after decoding, which is not a "
-            f"multiple of {record_size} for {RECORD_FORMAT_DISPLAY[record_format]}."
+            f"Input length {len(data)} is not a multiple of {record_size} "
+            f"for legacy terminated format"
         )
-
     packets = []
     discarded_chunks = []
     for offset in range(0, len(data), record_size):
         payload_end = offset + payload_size
-        record_terminator = data[payload_end : payload_end + len(terminator)]
-        if record_terminator != terminator:
-            raise ValueError(
-                f"Record at byte offset {offset} does not end with "
-                f"the expected {terminator.hex()} terminator after "
-                f"{payload_size} payload bytes."
-            )
-        packets.append(data[offset : offset + PACKET_SIZE])
-        discarded_chunks.append(data[offset + PACKET_SIZE : payload_end])
+        if data[payload_end : payload_end + len(terminator)] != terminator:
+            raise ValueError(f"Bad terminator at offset {offset}")
+        packets.append(data[offset : offset + payload_size])
+        discarded_chunks.append(data[offset + payload_size : payload_end])
 
     warnings = []
-    truncation_warning = _build_truncation_warning(payload_size, discarded_chunks)
-    if truncation_warning is not None:
-        warnings.append(truncation_warning)
+    extra = payload_size - LEGACY_PACKET_SIZE
+    if extra != 0:
+        pass
+    if any(any(chunk) for chunk in discarded_chunks):
+        warnings.append(
+            "Legacy format: non-zero bytes between 98-byte payload and terminator "
+            "(unexpected)."
+        )
     return packets, warnings
 
 
-def _payload_sizes_to_try(data_length: int, terminator_length: int):
-    max_payload_size = min(MAX_AUTO_PAYLOAD_SIZE, data_length - terminator_length)
-    return range(PACKET_SIZE, max_payload_size + 1)
-
-
 def _split_records_for_format(data: bytes, record_format: str):
-    if record_format == RECORD_FORMAT_RAW:
-        return _split_raw_records(data)
-
-    errors = []
-    terminator_length = len(RECORD_TERMINATORS[record_format])
-    for payload_size in _payload_sizes_to_try(len(data), terminator_length):
-        try:
-            return _split_terminated_records(data, record_format, payload_size)
-        except ValueError as exc:
-            errors.append(str(exc))
-
-    raise ValueError(
-        f"Could not parse {RECORD_FORMAT_DISPLAY[record_format]} using payload "
-        f"sizes from {PACKET_SIZE} through "
-        f"{min(MAX_AUTO_PAYLOAD_SIZE, len(data) - terminator_length)} bytes. "
-        f"Last error: {errors[-1] if errors else 'input is too short'}"
-    )
+    if record_format == RECORD_FORMAT_LEN_RAW:
+        return _split_len_prefixed_raw(data)
+    if record_format in LEN_TERMINATORS:
+        return _split_len_prefixed_terminated(data, LEN_TERMINATORS[record_format])
+    if record_format == RECORD_FORMAT_FIXED98_RAW:
+        return _split_fixed98_raw(data)
+    if record_format in LEGACY_TERMINATORS:
+        return _split_fixed98_terminated(data, record_format)
+    raise ValueError(f"Unknown record format {record_format!r}")
 
 
 def _split_records(data: bytes, record_format: str = RECORD_FORMAT_AUTO):
@@ -256,10 +378,14 @@ def _split_records(data: bytes, record_format: str = RECORD_FORMAT_AUTO):
         return packets, record_format, warnings
 
     format_order = (
-        RECORD_FORMAT_CRLF,
-        RECORD_FORMAT_LF,
-        RECORD_FORMAT_CR,
-        RECORD_FORMAT_RAW,
+        RECORD_FORMAT_LEN_CRLF,
+        RECORD_FORMAT_LEN_LF,
+        RECORD_FORMAT_LEN_CR,
+        RECORD_FORMAT_LEN_RAW,
+        RECORD_FORMAT_FIXED98_RAW,
+        RECORD_FORMAT_FIXED98_CRLF,
+        RECORD_FORMAT_FIXED98_LF,
+        RECORD_FORMAT_FIXED98_CR,
     )
     errors = []
     for candidate_format in format_order:
@@ -271,9 +397,9 @@ def _split_records(data: bytes, record_format: str = RECORD_FORMAT_AUTO):
         return packets, candidate_format, warnings
 
     raise ValueError(
-        "Could not auto-detect packet record format. Tried raw 98-byte packets, "
-        "LF-terminated records, CR-terminated records, and CRLF-terminated "
-        "records. Details: " + "; ".join(errors)
+        "Could not auto-detect packet record format. Tried length-prefixed "
+        "(CRLF/LF/CR/raw), then legacy fixed 98-byte layouts. Details: "
+        + "; ".join(errors)
     )
 
 
@@ -301,6 +427,7 @@ class TelemetryPacketViewer(tk.Tk):
         self.goto_var = tk.StringVar(value="1")
         self.record_format_var = tk.StringVar(value="Auto detect")
         self.current_record_format = RECORD_FORMAT_AUTO
+        self.decode_as_legacy = False
         self.warning_var = tk.StringVar(value="")
 
         self._build_ui()
@@ -317,7 +444,7 @@ class TelemetryPacketViewer(tk.Tk):
             textvariable=self.record_format_var,
             values=tuple(RECORD_FORMAT_LABELS.keys()),
             state="readonly",
-            width=31,
+            width=48,
         )
         format_selector.pack(side=tk.LEFT, padx=(4, 8))
         ttk.Button(top, text="Open log…", command=self.open_file).pack(side=tk.LEFT)
@@ -411,6 +538,7 @@ class TelemetryPacketViewer(tk.Tk):
             return
         self.packets = packets
         self.current_record_format = detected_format
+        self.decode_as_legacy = detected_format in LEGACY_DECODE_FORMATS
         self.current_index = 0
         self.path_var.set(
             f"{path} ({len(packets)} packets, {RECORD_FORMAT_DISPLAY[detected_format]})"
@@ -461,7 +589,15 @@ class TelemetryPacketViewer(tk.Tk):
         self.hex_text.configure(state=tk.DISABLED)
 
         self.table.delete(*self.table.get_children())
-        for row in decode_packet(packet):
+        try:
+            if self.decode_as_legacy:
+                rows = decode_legacy_packet(packet)
+            else:
+                rows = decode_packet(packet)
+        except ValueError as exc:
+            messagebox.showerror("Decode error", str(exc))
+            return
+        for row in rows:
             self.table.insert(
                 "",
                 tk.END,
@@ -478,13 +614,24 @@ class TelemetryPacketViewer(tk.Tk):
 
 
 def main():
+    all_formats = (
+        RECORD_FORMAT_AUTO,
+        RECORD_FORMAT_LEN_RAW,
+        RECORD_FORMAT_LEN_LF,
+        RECORD_FORMAT_LEN_CR,
+        RECORD_FORMAT_LEN_CRLF,
+        RECORD_FORMAT_FIXED98_RAW,
+        RECORD_FORMAT_FIXED98_LF,
+        RECORD_FORMAT_FIXED98_CR,
+        RECORD_FORMAT_FIXED98_CRLF,
+    )
     parser = argparse.ArgumentParser(description="View Spencer Board telemetry packets")
     parser.add_argument("path", nargs="?", help="Optional telemetry log path to open on startup")
     parser.add_argument(
         "--record-format",
-        choices=(RECORD_FORMAT_AUTO, *RECORD_TERMINATORS.keys()),
+        choices=all_formats,
         default=RECORD_FORMAT_AUTO,
-        help="Packet record format to use when opening the optional startup path.",
+        help="Packet record format when opening the optional startup path.",
     )
     args = parser.parse_args()
     app = TelemetryPacketViewer()
